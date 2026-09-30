@@ -40,6 +40,16 @@ async def db_session_factory() -> AsyncIterator:
     yield get_session_factory()
     await dispose_engine()
 
+    # Automatically clean up ephemeral test db file so repository stays clean
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url.startswith("sqlite:///"):
+        db_path = db_url.replace("sqlite:///", "")
+        if os.path.exists(db_path) and db_path.endswith(".test.db"):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+
 
 class FakeWhatsAppClient:
     """Captures outbound sends; never touches the network."""
