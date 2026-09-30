@@ -13,32 +13,41 @@ import redis.asyncio as aioredis
 
 from app.core.config import get_settings
 
+import time
+
 logger = logging.getLogger("okoa.session_store")
 
 _client: aioredis.Redis | None = None
-_available = True  # optimistic; flipped on first connection error
+_last_failure_time: float = 0.0
+_failure_cooldown_seconds: float = 15.0
 
 
 async def get_redis() -> aioredis.Redis | None:
-    global _client, _available
-    if not _available:
+    global _client, _last_failure_time
+    now = time.monotonic()
+    if _last_failure_time > 0 and (now - _last_failure_time) < _failure_cooldown_seconds:
         return None
+
     if _client is None:
         settings = get_settings()
         _client = aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
         await _client.ping()
+        if _last_failure_time > 0:
+            logger.info("redis connection restored; exiting degraded mode")
+            _last_failure_time = 0.0
         return _client
     except Exception as exc:  # pragma: no cover - infra-dependent
-        logger.warning("redis unavailable, degrading to DB-only mode: %s", type(exc).__name__)
-        _available = False
+        if _last_failure_time == 0.0:
+            logger.warning("redis unavailable, degrading to DB-only mode: %s", type(exc).__name__)
+        _last_failure_time = now
         return None
 
 
 def reset_for_tests(client: aioredis.Redis | None = None) -> None:
-    global _client, _available
+    global _client, _last_failure_time
     _client = client
-    _available = True
+    _last_failure_time = 0.0
 
 
 class SessionStore:

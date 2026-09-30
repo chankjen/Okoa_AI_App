@@ -33,13 +33,21 @@ export function createWebSocketClient(token, { onStatusChange, onEscalation, onM
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        // Route by event type (backend should set data.type)
-        if (data.type === 'escalation' || data.type === 'new_escalation') {
+        if (
+          data.type === 'escalation' ||
+          data.type === 'new_escalation' ||
+          data.type === 'escalation_new' ||
+          data.type === 'escalation_update'
+        ) {
           onEscalation?.(data);
-        } else if (data.type === 'message' || data.type === 'new_message') {
+        } else if (
+          data.type === 'message' ||
+          data.type === 'new_message' ||
+          data.type === 'chat_message'
+        ) {
           onMessage?.(data);
-        } else {
-          // Fallback: if no type, treat as escalation refresh trigger
+        } else if (data.type !== 'ping') {
+          // Fallback: if no recognized type, treat as escalation refresh trigger
           onEscalation?.(data);
         }
       } catch {

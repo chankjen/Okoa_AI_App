@@ -147,7 +147,7 @@ class MessagePipeline:
 
             # 3. Opt-out gate: STOP/FUTA handling (roadmap 1.5).
             stripped = event.text.strip().lower()
-            if stripped in {"stop", "futa", "kusimama", "unsibscribe"}:
+            if stripped in {"stop", "futa", "kusimama", "unsubscribe", "unsibscribe"}:
                 was_opted_out = user is not None and user.opt_out
                 await self.identity.opt_out(db, user_uuid)
                 await db.commit()
@@ -197,17 +197,18 @@ class MessagePipeline:
             control = await db.get(SessionControl, user_uuid)
             if control is not None and control.mode is HandoverMode.counselor_active:
                 session_id = await self.sessions.get_active_session_id(user_uuid)
-                if session_id:
-                    db.add(Message(
-                        session_id=session_id,
-                        direction=MessageDirection.inbound,
-                        kind=MessageKind.user_text,
-                        wa_message_id=event.wa_message_id,
-                        body=event.text[:4000],
-                    ))
+                msg = Message(
+                    session_id=session_id or "direct",
+                    direction=MessageDirection.inbound,
+                    kind=MessageKind.user_text,
+                    wa_message_id=event.wa_message_id,
+                    body=event.text[:4000],
+                )
+                db.add(msg)
                 await db.commit()
                 logger.info("bot paused (counselor handover)", extra={
                     "event": "handover_hold", "user_uuid": user_uuid})
+                await self._broadcast_inbound_chat(user_uuid, session_id or "", event.text[:4000], msg.id)
                 return
 
             # Explicit human request keyword → create escalation + notify.
@@ -220,25 +221,33 @@ class MessagePipeline:
             #    (2.4) + escalation queue (3.1). Falls back to Phase-1 keyword
             #    detection when the engine is disabled or unwired.
             result = await self._assess_risk(db, user_uuid, event)
-            if result is not None and result.is_crisis:
+            is_crisis = (result is not None and result.is_crisis) or (
+                self.settings.enable_crisis_keyword_fallback and detect_crisis(event.text)
+            )
+
+            if is_crisis:
                 await self._send(db, user_uuid, event, CRISIS_RESPONSE_TEXT,
                                  MessageKind.crisis_response, risk_label="crisis")
                 await db.commit()
                 return
-            if result is not None and result.label is RiskLabel.distressed:
-                await self._send(db, user_uuid, event, DISTRESS_NUDGE,
-                                 MessageKind.canned_reply, risk_label="distressed")
+
+            # Both 'safe' and 'distressed' messages are eligible for LLM generation
+            # (roadmap Phase 4: 'the LLM only ever sees low/medium-risk messages').
+            risk_label_str = result.label.value if result else "safe"
+            llm_reply = await self._generate_llm_reply(db, user_uuid, event, risk_label_str)
+            if llm_reply:
+                await self._send(db, user_uuid, event, llm_reply,
+                                 MessageKind.canned_reply, risk_label=risk_label_str)
                 await db.commit()
                 return
 
-            crisis_fallback = (
-                self.settings.enable_crisis_keyword_fallback
-                and detect_crisis(event.text)
-            )
-            kind = MessageKind.crisis_response if crisis_fallback else MessageKind.canned_reply
-            body = CRISIS_RESPONSE_TEXT if crisis_fallback else CANNED_REPLY
-            await self._send(db, user_uuid, event, body, kind,
-                             risk_label="crisis" if crisis_fallback else None)
+            # Canned fallback if LLM is disabled or unavailable:
+            if result is not None and result.label is RiskLabel.distressed:
+                await self._send(db, user_uuid, event, DISTRESS_NUDGE,
+                                 MessageKind.canned_reply, risk_label="distressed")
+            else:
+                await self._send(db, user_uuid, event, CANNED_REPLY,
+                                 MessageKind.canned_reply, risk_label=risk_label_str)
             await db.commit()
 
     # ------------------------------------------------------ risk helpers
@@ -366,3 +375,116 @@ class MessagePipeline:
         except Exception as exc:
             # Outbound failure must not lose the inbound record; log & continue.
             logger.error("outbound send failed err=%s", type(exc).__name__)
+
+    async def _broadcast_inbound_chat(
+        self, user_uuid: str, session_id: str, text: str, message_id: str | None = None
+    ) -> None:
+        """Push user's incoming message to the counselor dashboard in real time."""
+        try:
+            from app.api.ws import hub
+
+            await hub.broadcast({
+                "type": "chat_message",
+                "user_uuid": user_uuid,
+                "session_id": session_id,
+                "message_id": message_id,
+                "direction": "inbound",
+                "body": text,
+                "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            })
+        except Exception:
+            logger.exception("ws inbound broadcast failed (non-fatal)")
+
+    async def _generate_llm_reply(
+        self,
+        db: AsyncSession,
+        user_uuid: str,
+        event: InboundEvent,
+        risk_label: str,
+    ) -> str | None:
+        """Call LLM inference serving (Phase 4), or return None on failure/unconfigured."""
+        if not self.settings.enable_llm or not self.settings.llm_api_base:
+            return None
+        import httpx
+
+        session_id = await self.sessions.get_active_session_id(user_uuid)
+        history = await get_session_history(db, user_uuid, session_id=session_id, limit=8)
+
+        system_prompt = (
+            "You are OKOA, a compassionate, anonymous mental health companion in Kenya. "
+            "Communicate warmly in Swahili, Sheng, or English matching the user. "
+            "Hard rules: no medication advice, no medical diagnosis, always encourage safety."
+        )
+        if risk_label == "distressed":
+            system_prompt += (
+                " The user is experiencing emotional distress. Offer gentle CBT-based "
+                "validation, grounding, and empathetic listening."
+            )
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": event.text})
+
+        headers = {"Content-Type": "application/json"}
+        if self.settings.llm_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+
+        payload = {
+            "model": self.settings.llm_model_name,
+            "messages": messages,
+            "max_tokens": self.settings.llm_max_tokens,
+            "temperature": self.settings.llm_temperature,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_seconds) as client:
+                url = f"{self.settings.llm_api_base.rstrip('/')}/chat/completions"
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                logger.warning("llm inference returned status=%d body=%s", resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.warning("llm inference failed (%s); falling back to supportive template", type(exc).__name__)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Conversation History Extraction Helper (multi-turn context window)
+# ---------------------------------------------------------------------------
+async def get_session_history(
+    db: AsyncSession,
+    user_uuid: str,
+    *,
+    session_id: str | None = None,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    """Retrieve recent conversation turns for user_uuid in chronological order.
+
+    Pulls from ChatSession / Message models. Formatted as OpenAI/vLLM-compatible
+    messages list: [{"role": "user"|"assistant", "content": ...}]
+    """
+    stmt = (
+        select(Message)
+        .join(ChatSession, Message.session_id == ChatSession.id)
+        .where(ChatSession.user_uuid == user_uuid)
+    )
+    if session_id:
+        stmt = stmt.where(Message.session_id == session_id)
+    stmt = (
+        stmt.where(
+            Message.kind.in_([
+                MessageKind.user_text,
+                MessageKind.canned_reply,
+                MessageKind.system,
+            ])
+        )
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.scalars(stmt)).all()
+    history = []
+    for m in reversed(rows):
+        role = "user" if m.direction == MessageDirection.inbound else "assistant"
+        history.append({"role": role, "content": m.body})
+    return history

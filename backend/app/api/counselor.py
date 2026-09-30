@@ -160,6 +160,7 @@ async def unclaim(escalation_id: str,
         details={"escalation_id": esc.id},
     )
     await db.commit()
+    await _broadcast(payload={"type": "escalation_update", **_esc_dict(esc)})
     return _esc_dict(esc)
 
 
@@ -195,6 +196,7 @@ async def resolve(escalation_id: str, body: ResolveRequest,
         details={"escalation_id": esc.id, "outcome": body.outcome.value},
     )
     await db.commit()
+    await _broadcast(payload={"type": "escalation_update", **_esc_dict(esc)})
     logger.info("escalation resolved", extra={"event": "resolved",
                                               "was_open_like": was_open_like})
     return _esc_dict(esc)
@@ -222,6 +224,7 @@ async def mute(escalation_id: str, body: ResolveRequest,
         details={"escalation_id": esc.id, "outcome": body.outcome.value},
     )
     await db.commit()
+    await _broadcast(payload={"type": "escalation_update", **_esc_dict(esc)})
     return _esc_dict(esc)
 
 
@@ -281,6 +284,7 @@ async def handover(escalation_id: str, body: HandoverRequest, request: Request,
     elif esc.status is EscalationStatus.handed_over:
         esc.status = EscalationStatus.claimed
     await db.commit()
+    await _broadcast(payload={"type": "escalation_update", **_esc_dict(esc)})
     return {"escalation": _esc_dict(esc), "mode": body.mode.value}
 
 

@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     smtp_password: str = Field(default="", repr=False)
     smtp_from: str = "alerts@okoa.ai"
 
+    # --- Phase 4 Conversational AI (Llama 3 inference serving) ---------------
+    enable_llm: bool = False               # False until Phase 4 inference engine is active
+    llm_api_base: str = "http://localhost:8000/v1"  # vLLM / TGI / Ollama endpoint
+    llm_model_name: str = "meta-llama/Meta-Llama-3-8B-Instruct"
+    llm_api_key: str = Field(default="", repr=False)
+    llm_timeout_seconds: float = 4.5       # NFR: total response target < 5.0s
+    llm_max_tokens: int = 250
+    llm_temperature: float = 0.7
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
