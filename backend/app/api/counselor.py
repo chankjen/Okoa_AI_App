@@ -467,5 +467,17 @@ async def _broadcast(payload: dict) -> None:
 
 
 def _service_from_request(request: Request):
-    # Reuse the app-wide escalation service.
-    return request.app.state.escalation
+    """Return the app-wide EscalationService, creating one lazily in test envs."""
+    try:
+        return request.app.state.escalation
+    except AttributeError:
+        from app.safety.escalation import EscalationService as _EscalationService
+        from app.services.notifications import Notifier
+        from app.services.whatsapp_client import WhatsAppClient
+        from app.api.ws import hub as _hub
+
+        _wa = WhatsAppClient()
+        _notifier = Notifier(wa_client=_wa)
+        svc = _EscalationService(notifier=_notifier, hub=_hub)
+        request.app.state.escalation = svc
+        return svc

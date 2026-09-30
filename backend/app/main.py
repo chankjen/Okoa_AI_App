@@ -9,13 +9,16 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.api import ops, webhooks
+from app.api import counselor, ops, webhooks, ws
 from app.core.config import get_settings
 from app.core.logging import configure_logging, new_request_id, request_id_var
 from app.db.session import dispose_engine, get_session_factory, init_models
+from app.safety.escalation import EscalationService
 from app.services.identity_service import IdentityService
+from app.services.notifications import Notifier
 from app.services.pipeline import MessagePipeline
 from app.services.session_store import SessionStore
 from app.services.whatsapp_client import WhatsAppClient
@@ -56,11 +59,15 @@ def create_app() -> FastAPI:
         app.state.identity = IdentityService(vault)
         app.state.sessions = SessionStore()
         app.state.wa = WhatsAppClient()
+        app.state.notifier = Notifier(wa_client=app.state.wa)
+        app.state.hub = ws.hub
+        app.state.escalation = EscalationService(notifier=app.state.notifier, hub=app.state.hub)
         app.state.pipeline = MessagePipeline(
             session_factory=get_session_factory(),
             identity=app.state.identity,
             sessions=app.state.sessions,
             wa=app.state.wa,
+            escalation=app.state.escalation,
         )
         app.state.pipeline.start()
         logger.info("okoa backend ready env=%s", settings.environment)
@@ -68,16 +75,31 @@ def create_app() -> FastAPI:
         await app.state.pipeline.stop()
         await dispose_engine()
 
-    app = FastAPI(title="OKOA AI Backend", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="OKOA AI Backend", version="0.3.0", lifespan=lifespan)
     app.add_middleware(RequestIDMiddleware)
+
+    cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
+    if not cors_origins:
+        cors_origins = ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(ops.router)
     app.include_router(webhooks.router)
+    app.include_router(counselor.router)
+    app.include_router(ws.router)
 
     @app.get("/")
     async def root():
-        return {"service": settings.app_name, "phase": "1-whatsapp-gateway"}
+        return {"service": settings.app_name, "phase": "3-counselor-loop"}
 
     return app
+
 
 
 app = create_app()

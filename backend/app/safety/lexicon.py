@@ -30,7 +30,7 @@ CRISIS_TERMS: list[tuple[str, float]] = [
     (r"\bsuicidal\b", 90),
     (r"want(ed)?\s+to\s+die\b", 85),
     (r"end(ing)?\s+my\s+life", 90),
-    (r"take\s+my\s+(own\s+)?life", 90),
+    (r"tak(e|ing)\s+my\s+(own\s+)?life", 90),
     (r"no\s+reason\s+to\s+live", 80),
     (r"wish(i)?\s+(that\s+)?i\s+(were|was)\s+dead", 75),
     (r"(cant|can\s?not|cannot)\s+go\s+on", 60),
@@ -50,7 +50,7 @@ CRISIS_TERMS: list[tuple[str, float]] = [
     (r"jinai\b", 85),
     (r"kunyong'ona", 80),
     # Sheng / slang variants
-    (r"nataka\s+kufa\b", 85),
+    (r"nataka\s+kufa\b", 90),
     (r"nitakufa\b", 80),
     (r"nikufa\b", 75),
     (r"kuhamia?\s+binguni", 70),              # "move to heaven" euphemism
@@ -83,7 +83,8 @@ DISTRESS_TERMS: list[str] = [
     r"\bstress(ed)?\b", r"\blonely\b", r"\bcrying\b", r"\bcraving\b", r"\brelapse\b",
     # Swahili / Sheng
     r"\bnimechoka\b", r"\bnina\s+huzuni\b", r"\bhuzuni\b", r"\bnivumishiwi\b",
-    r"\bnaogopa\b", r"\bsinanjali\b", r"\bmaumivu\b", r"\bmsongo\s+mko\b",
+    r"\bnaogopa\b", r"\bsinanjali\b", r"\bmaumivu\b", r"\bmsongo(\s+wa\s+mawazo)?\b",
+    r"\bmawazo\b", r"\bupweke\b", r"\bhofu\b",
     r"\bnaondoka\s+peke\b", r"\bvuma\b", r"\bniko\s+chini\b",
     r"\busingizi\b", r"\bmtizo\b",
 ]

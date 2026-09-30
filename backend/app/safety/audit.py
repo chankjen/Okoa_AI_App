@@ -24,6 +24,10 @@ def compute_entry_hash(
     prev_hash: str, timestamp: dt.datetime, actor_type: str, actor_id: str | None,
     action: str, subject_uuid: str | None, details_json: str,
 ) -> str:
+    # Normalise to naive-UTC so the hash is identical whether the timestamp
+    # comes in tz-aware (at write time) or tz-naive (after SQLite round-trip).
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(dt.timezone.utc).replace(tzinfo=None)
     ts = timestamp.isoformat()
     material = "|".join([prev_hash, ts, actor_type, actor_id or "", action,
                          subject_uuid or "", details_json])

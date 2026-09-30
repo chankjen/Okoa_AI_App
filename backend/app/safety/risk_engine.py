@@ -85,12 +85,15 @@ def score_message(
         crisis_component = 0.0
 
     plan_boost = min(24.0, 12.0 * len(plan_hits))
-    distress_component = min(60.0, 15.0 * len(set(distress_hits)))
+    if distress_hits:
+        distress_component = min(60.0, 25.0 * len(set(distress_hits)))
+    else:
+        distress_component = 0.0
     history_boost = 10.0 if recent_distressed_count >= 2 else 0.0
-
-    score = _clamp(
-        crisis_component + plan_boost + 0.25 * distress_component + history_boost
-    )
+    # When no crisis hits exist, distress component directly drives the score
+    # to allow reaching distress_threshold (45.0).
+    effective_distress = distress_component if crisis_component == 0.0 else 0.25 * distress_component
+    score = _clamp(crisis_component + plan_boost + effective_distress + history_boost)
 
     if score > crisis_threshold:
         label = RiskLabel.crisis

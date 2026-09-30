@@ -93,8 +93,9 @@ class IdentityService:
             vault_row.status = "tombstoned"
             vault_row.purged_at = dt.datetime.now(dt.timezone.utc)
             # Hard-delete ciphertext now; tombstone row kept for audit only.
+            # Blind index is a one-way HMAC hash; preserving it allows recognizing
+            # that this number has opted out without storing any recoverable PII.
             vault_row.ciphertext = b""
-            vault_row.blind_index = "purged:" + vault_row.id
         logger.info("user opted out", extra={"event": "opt_out", "user_uuid": user_uuid})
 
     async def reveal_msisdn(self, db: AsyncSession, user_uuid: str) -> str | None:

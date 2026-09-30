@@ -1,1 +1,36 @@
-(empty)
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Pytest & local testing DBs
+.pytest_cache/
+*.test.db
+*.debug.db
+okoa_dev.db
+backend/*.test.db
+backend/*.debug.db
+backend/*.db
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Node / Dashboard
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+.npm
+
+# System
+.DS_Store
+Thumbs.db
