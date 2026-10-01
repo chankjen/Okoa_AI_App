@@ -274,6 +274,8 @@ class AuditAction(str, enum.Enum):
     login_success = "login_success"
     login_failure = "login_failure"
     drill_recorded = "drill_recorded"
+    user_data_wiped = "user_data_wiped"
+    user_data_exported = "user_data_exported"
 
 
 class AuditLogEntry(Base):
@@ -406,5 +408,89 @@ class RecoveryTracker(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Resource Matching & Compliance Hardening (roadmap 6.1-6.5)
+# ---------------------------------------------------------------------------
+
+
+class PartnerCategory(str, enum.Enum):
+    rehab = "rehab"                      # Inpatient residential rehabilitation
+    outpatient = "outpatient"            # Outpatient addiction / medical counseling
+    support_group = "support_group"      # AA / NA / 12-step peer support groups
+    youth_empowerment = "youth_empowerment"  # Vocational training, mentorship, wellness
+    mental_health = "mental_health"      # Psychiatric, psychotherapy, trauma counseling
+
+
+class SubsidyStatus(str, enum.Enum):
+    free = "free"                        # 100% free / government / donor funded
+    subsidized = "subsidized"            # Sliding scale or subsidized fees
+    nhif_covered = "nhif_covered"        # Covered by Social Health Authority (SHA) / NHIF
+    private = "private"                  # Private fee-for-service
+
+
+class Partner(Base):
+    """Verified NGO, rehab, or empowerment partner directory entry (roadmap 6.1)."""
+
+    __tablename__ = "partners"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    category: Mapped[PartnerCategory] = mapped_column(
+        Enum(PartnerCategory, name="partner_category"), index=True
+    )
+    county: Mapped[str] = mapped_column(String(64), index=True)
+    sub_county: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    phone: Mapped[str] = mapped_column(String(64))
+    helpline: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    website: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    services_description: Mapped[str] = mapped_column(Text)
+    subsidy_status: Mapped[SubsidyStatus] = mapped_column(
+        Enum(SubsidyStatus, name="subsidy_status"), default=SubsidyStatus.subsidized
+    )
+    verified_by: Mapped[str] = mapped_column(String(128), default="NACADA / OKOA Clinical Advisory")
+    verified_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    operating_hours: Mapped[str] = mapped_column(String(128), default="Mon-Fri 08:00-17:00")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    referrals: Mapped[list["ReferralEvent"]] = relationship(back_populates="partner")
+
+
+class ReferralEvent(Base):
+    """Referral event log for KPI tracking (roadmap 6.2 - 500+ referrals Year 1)."""
+
+    __tablename__ = "referral_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    user_uuid: Mapped[str] = mapped_column(String(36), index=True)
+    partner_id: Mapped[str | None] = mapped_column(
+        ForeignKey("partners.id"), nullable=True, index=True
+    )
+    county: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    action: Mapped[str] = mapped_column(
+        String(32), default="partner_viewed"
+    )  # directory_search | partner_viewed | contact_requested
+    status: Mapped[str] = mapped_column(String(32), default="initiated")
+    source: Mapped[str] = mapped_column(String(32), default="whatsapp_interactive")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    partner: Mapped[Partner | None] = relationship(back_populates="referrals")
+
+
+Index("ix_referrals_county_created", ReferralEvent.county, ReferralEvent.created_at.desc())
 
 

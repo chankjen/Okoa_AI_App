@@ -33,8 +33,8 @@ from app.db.models import (
     SessionControl,
     User,
 )
+from app.services.compliance_service import ComplianceService
 from app.services.crisis_keywords import CRISIS_RESPONSE_TEXT, detect_crisis
-from app.services.webhook_security import verify_signature  # noqa: F401 (re-export for tests)
 from app.services.identity_service import IdentityService
 from app.services.language_service import detect_language
 from app.services.llm_client import Llama3Client
@@ -42,8 +42,10 @@ from app.services.mood_service import MoodService
 from app.services.prompt_service import PromptService
 from app.services.rag_service import RagService
 from app.services.recovery_service import RecoveryService
+from app.services.resource_service import COUNTY_MAP, ResourceService, normalize_county
 from app.services.session_store import SessionStore
 from app.services.survey_service import SurveyService
+from app.services.webhook_security import verify_signature  # noqa: F401 (re-export for tests)
 from app.services.whatsapp_client import WhatsAppClient
 
 logger = logging.getLogger("okoa.pipeline")
@@ -101,6 +103,8 @@ class MessagePipeline:
         mood_service: MoodService | None = None,
         survey_service: SurveyService | None = None,
         recovery_service: RecoveryService | None = None,
+        resource_service: ResourceService | None = None,
+        compliance_service: ComplianceService | None = None,
     ):
         self.session_factory = session_factory
         self.identity = identity
@@ -117,6 +121,9 @@ class MessagePipeline:
         self.mood_service = mood_service or MoodService()
         self.survey_service = survey_service or SurveyService()
         self.recovery_service = recovery_service or RecoveryService()
+        # Phase 6: Resource matching & compliance hardening (roadmap 6.1 - 6.3)
+        self.resource_service = resource_service or ResourceService()
+        self.compliance_service = compliance_service or ComplianceService()
         self.queue: asyncio.Queue[InboundEvent] = asyncio.Queue(maxsize=10_000)
         self._worker: asyncio.Task | None = None
         self.settings = get_settings()
@@ -174,8 +181,20 @@ class MessagePipeline:
                 user.language = detected_lang
                 await db.flush()
 
-            # 3. Opt-out gate: STOP/FUTA handling (roadmap 1.5).
+            # 3. Data subject controls & opt-out gate (roadmap 1.5 & 6.3).
             stripped = event.text.strip().lower()
+            if stripped in {
+                "futa data yangu", "futa data", "delete my data",
+                "wipe my data", "futa kila kitu", "erase data",
+            } or "futa data" in stripped or "delete my data" in stripped:
+                await self.compliance_service.wipe_user_data(db, user_uuid, self.sessions)
+                wipe_msg = self.compliance_service.get_wipe_confirmation_message(detected_lang)
+                try:
+                    await self.wa.send_text(event.wa_user_id, wipe_msg)
+                except Exception as exc:
+                    logger.error("outbound wipe confirm send failed: %s", exc)
+                return
+
             if stripped in {"stop", "futa", "kusimama", "unsubscribe", "unsibscribe"}:
                 was_opted_out = user is not None and user.opt_out
                 await self.identity.opt_out(db, user_uuid)
@@ -187,6 +206,18 @@ class MessagePipeline:
 
             if user is not None and user.opt_out:
                 logger.info("message from opted-out user ignored", extra={"user_uuid": user_uuid})
+                await db.commit()
+                return
+
+            # Self-service DPA data summary request (roadmap 6.3)
+            if stripped in {
+                "maelezo", "data summary", "ripoti yangu", "my data",
+                "what data do you have", "maelezo yangu",
+            }:
+                summary_msg = await self.compliance_service.generate_data_summary(
+                    db, user_uuid, language=detected_lang
+                )
+                await self._send(db, user_uuid, event, summary_msg, MessageKind.canned_reply, risk_label="safe")
                 await db.commit()
                 return
 
@@ -320,6 +351,122 @@ class MessagePipeline:
                 await self._send(db, user_uuid, event, reset_msg, MessageKind.canned_reply, risk_label="distressed")
                 await db.commit()
                 return
+
+            # 4d. Phase 6 Resource matching & verified partner directory (roadmap 6.1 - 6.2)
+            if iid.startswith("res_county_") or iid.startswith("county_"):
+                county = normalize_county(event.interactive_id)
+                partners = await self.resource_service.search_partners(db, county=county, limit=3)
+                for p in partners:
+                    await self.resource_service.record_referral(
+                        db,
+                        user_uuid=user_uuid,
+                        partner_id=p.id,
+                        county=county,
+                        category=p.category.value if hasattr(p.category, "value") else str(p.category),
+                        action="partner_viewed",
+                    )
+                dir_reply = self.resource_service.format_whatsapp_directory_response(
+                    partners, county=county, language=detected_lang
+                )
+                await self._send(db, user_uuid, event, dir_reply, MessageKind.canned_reply, risk_label="safe")
+                await db.commit()
+                return
+
+            if iid.startswith("res_partner_"):
+                partner_id = event.interactive_id.replace("res_partner_", "")
+                partner = await self.resource_service.get_partner(db, partner_id)
+                if partner:
+                    await self.resource_service.record_referral(
+                        db,
+                        user_uuid=user_uuid,
+                        partner_id=partner.id,
+                        county=partner.county,
+                        category=partner.category.value if hasattr(partner.category, "value") else str(partner.category),
+                        action="contact_requested",
+                    )
+                    partner_detail = (
+                        f"🏥 *{partner.name}*\n"
+                        f"📍 {partner.county} ({partner.sub_county or 'Eneo Kuu'})\n"
+                        f"📞 Simu ya mawasiliano: {partner.phone}\n"
+                        f"☎️ Helpline: {partner.helpline or partner.phone}\n"
+                        f"🕒 {partner.operating_hours}\n\n"
+                        f"ℹ️ {partner.services_description}\n\n"
+                        "🔒 Unaweza kuwasiliana nao moja kwa moja bila hofu. OKOA haitashiriki nambari yako kamwe."
+                    )
+                    await self._send(db, user_uuid, event, partner_detail, MessageKind.canned_reply, risk_label="safe")
+                    await db.commit()
+                    return
+
+            REHAB_TRIGGERS = {
+                "rehab", "kituo", "rehabilitation", "hospital", "center",
+                "msaada wa karibu", "resources", "support group", "vituo",
+                "find help", "matibabu", "tafuta kituo",
+            }
+            if stripped in REHAB_TRIGGERS or any(kw in stripped for kw in ["rehab", "kituo cha", "vituo vya", "tafuta kituo", "msaada wa karibu"]):
+                await self.resource_service.record_referral(
+                    db,
+                    user_uuid=user_uuid,
+                    partner_id=None,
+                    county="Nationwide",
+                    action="directory_search",
+                )
+                body_text, btn_label, sections = self.resource_service.build_county_selection_interactive(
+                    language=detected_lang
+                )
+                try:
+                    await self.wa.send_interactive_list(
+                        event.wa_user_id,
+                        body_text=body_text,
+                        button_label=btn_label,
+                        sections=sections,
+                    )
+                    # Persist message in DB
+                    session_id = await self.sessions.get_active_session_id(user_uuid)
+                    session = await db.get(ChatSession, session_id) if session_id else None
+                    if session is None:
+                        session = ChatSession(user_uuid=user_uuid)
+                        db.add(session)
+                        await db.flush()
+                        await self.sessions.touch(user_uuid, session.id)
+                    db.add(Message(
+                        session_id=session.id,
+                        direction=MessageDirection.inbound,
+                        kind=MessageKind.user_text,
+                        wa_message_id=event.wa_message_id,
+                        body=event.text[:4000],
+                        risk_label="safe",
+                    ))
+                    db.add(Message(
+                        session_id=session.id,
+                        direction=MessageDirection.outbound,
+                        kind=MessageKind.canned_reply,
+                        body=body_text,
+                    ))
+                    await db.commit()
+                except Exception:
+                    await self._send(db, user_uuid, event, body_text, MessageKind.canned_reply, risk_label="safe")
+                    await db.commit()
+                return
+
+            if stripped in COUNTY_MAP and stripped not in {"kenya", "all"}:
+                county = COUNTY_MAP[stripped]
+                partners = await self.resource_service.search_partners(db, county=county, limit=3)
+                if partners:
+                    for p in partners:
+                        await self.resource_service.record_referral(
+                            db,
+                            user_uuid=user_uuid,
+                            partner_id=p.id,
+                            county=county,
+                            category=p.category.value if hasattr(p.category, "value") else str(p.category),
+                            action="partner_viewed",
+                        )
+                    dir_reply = self.resource_service.format_whatsapp_directory_response(
+                        partners, county=county, language=detected_lang
+                    )
+                    await self._send(db, user_uuid, event, dir_reply, MessageKind.canned_reply, risk_label="safe")
+                    await db.commit()
+                    return
 
             # 5. Risk pre-screening gate (roadmap 2.3) with crisis routing
             #    (2.4) + escalation queue (3.1). Falls back to Phase-1 keyword

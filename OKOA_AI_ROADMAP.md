@@ -120,11 +120,11 @@ Phases 0–3 constitute the **walking skeleton MVP** (a user can chat, get a saf
 
 > Goal: Epic 5 + full Kenya DPA compliance — bridge digital support to physical care (the Concept Note's differentiator).
 
-- [ ] **6.1 Verified partner directory** — Seed PostgreSQL with vetted NGOs/rehabs/empowerment programs (name, services, county/geo, contact, subsidy status, verification date). Backfill workflow for adding partners.
-- [ ] **6.2 Geo-matching flow** — Coarse location capture via WhatsApp interactive list (county/sub-county — **never GPS-level PII**); return top 2–3 matches with the option to remain anonymous. Track referral events (KPI: 500+ referrals Year 1).
-- [ ] **6.3 Self-service data controls** — Implement **"Futa data yangu"** full-wipe command (hard delete across DB/Redis/vector store, tombstone in vault); "Maelezo" data-summary request flow.
-- [ ] **6.4 Security review** — Pen test; verify AES-256 at rest, TLS 1.3 in transit, vault isolation, log scrubbing (no message content in app logs by default).
-- [ ] **6.5 Documentation & ODPC filing** — Privacy policy published, records of processing maintained, DPIA finalized.
+- [x] **6.1 Verified partner directory** — Seed PostgreSQL with vetted NGOs/rehabs/empowerment programs (name, services, county/geo, contact, subsidy status, verification date). Backfill workflow for adding partners.
+- [x] **6.2 Geo-matching flow** — Coarse location capture via WhatsApp interactive list (county/sub-county — **never GPS-level PII**); return top 2–3 matches with the option to remain anonymous. Track referral events (KPI: 500+ referrals Year 1).
+- [x] **6.3 Self-service data controls** — Implement **"Futa data yangu"** full-wipe command (hard delete across DB/Redis/vector store, tombstone in vault); "Maelezo" data-summary request flow.
+- [x] **6.4 Security review** — Pen test; verify AES-256 at rest, TLS 1.3 in transit, vault isolation, log scrubbing (no message content in app logs by default).
+- [x] **6.5 Documentation & ODPC filing** — Privacy policy published, records of processing maintained, DPIA finalized.
 
 **Exit criteria:** A tester can find a nearby rehab anonymously and wipe all their data via one WhatsApp command; pen-test criticals resolved.
 

@@ -39,6 +39,19 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Enforce TLS 1.3 / HSTS and defensive HTTP security headers (roadmap 6.4)."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(logging.DEBUG if settings.debug else logging.INFO)
@@ -74,14 +87,30 @@ def create_app() -> FastAPI:
         from app.services.survey_service import SurveyService
         from app.services.recovery_service import RecoveryService
         from app.services.scheduler import CheckInScheduler
+        # Phase 6 components
+        from app.services.resource_service import ResourceService
+        from app.services.compliance_service import ComplianceService
+        from app.db.seeds.seed_data import seed_partners_if_empty
 
         app.state.mood_service = MoodService()
         app.state.survey_service = SurveyService()
         app.state.recovery_service = RecoveryService()
+        app.state.resource_service = ResourceService()
+        app.state.compliance_service = ComplianceService()
         app.state.scheduler = CheckInScheduler(
             identity_service=app.state.identity,
             wa_client=app.state.wa,
         )
+
+        # Seed initial vetted partner directory if empty (dev / staging)
+        if not settings.is_production:
+            try:
+                session_factory = get_session_factory()
+                async with session_factory() as seed_session:
+                    await seed_partners_if_empty(seed_session)
+            except Exception as exc:
+                logger.warning("partner seeding skipped (%s)", type(exc).__name__)
+
         app.state.pipeline = MessagePipeline(
             session_factory=get_session_factory(),
             identity=app.state.identity,
@@ -94,6 +123,8 @@ def create_app() -> FastAPI:
             mood_service=app.state.mood_service,
             survey_service=app.state.survey_service,
             recovery_service=app.state.recovery_service,
+            resource_service=app.state.resource_service,
+            compliance_service=app.state.compliance_service,
         )
         app.state.pipeline.start()
         logger.info("okoa backend ready env=%s", settings.environment)
@@ -101,8 +132,9 @@ def create_app() -> FastAPI:
         await app.state.pipeline.stop()
         await dispose_engine()
 
-    app = FastAPI(title="OKOA AI Backend", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="OKOA AI Backend", version="0.6.0", lifespan=lifespan)
     app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
     if not cors_origins:
@@ -122,7 +154,7 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     async def root():
-        return {"service": settings.app_name, "phase": "5-mood-tracking-retention"}
+        return {"service": settings.app_name, "phase": "6-resource-matching-compliance"}
 
     return app
 

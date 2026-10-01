@@ -15,17 +15,20 @@ import uuid as _uuid
 # Request id propagated by middleware so all lines of one request correlate.
 request_id_var: dict[str, str] = {}
 
-# Matches East-African / international MSISDNs in free text: +2547..., 07.../01...
-_PHONE_RE = re.compile(r"(\+?254|0)(7|1)\d{8}|\+\d{9,15}")
+# Matches East-African / international MSISDNs in free text: +254 7..., 07.../01...
+_PHONE_RE = re.compile(r"(?:(?:\+?254|0)[\s\-]?(?:7|1)(?:[\s\-]?\d){8}|\+\d(?:[\s\-]?\d){8,14})\b")
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
 CRISIS_MARKER = "<REDACTED_PHONE>"
+EMAIL_MARKER = "<REDACTED_EMAIL>"
 
 
 def scrub(text: str) -> str:
-    """Remove phone-number-looking substrings from arbitrary text."""
+    """Remove phone-number and email substrings from arbitrary text."""
     if not text:
         return text
-    return _PHONE_RE.sub(CRISIS_MARKER, text)
+    s = _PHONE_RE.sub(CRISIS_MARKER, text)
+    return _EMAIL_RE.sub(EMAIL_MARKER, s)
 
 
 class ScrubJsonFormatter(logging.Formatter):

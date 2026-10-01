@@ -543,6 +543,218 @@ async def set_duty(body: DutyRequest,
     return {"is_on_duty": counselor.is_on_duty}
 
 
+# ------------------------------------------------------------- Phase 6 Partners (6.1)
+class PartnerCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=128)
+    category: str = Field(..., description="rehab | outpatient | support_group | youth_empowerment | mental_health")
+    county: str = Field(..., max_length=64)
+    sub_county: str | None = None
+    address: str | None = None
+    phone: str = Field(..., max_length=64)
+    helpline: str | None = None
+    email: str | None = None
+    website: str | None = None
+    services_description: str
+    subsidy_status: str = Field("subsidized", description="free | subsidized | nhif_covered | private")
+    verified_by: str = "NACADA / OKOA Clinical Advisory"
+    operating_hours: str = "Mon-Fri 08:00-17:00"
+    is_active: bool = True
+
+
+class PartnerUpdateRequest(BaseModel):
+    name: str | None = None
+    category: str | None = None
+    county: str | None = None
+    sub_county: str | None = None
+    address: str | None = None
+    phone: str | None = None
+    helpline: str | None = None
+    email: str | None = None
+    website: str | None = None
+    services_description: str | None = None
+    subsidy_status: str | None = None
+    verified_by: str | None = None
+    operating_hours: str | None = None
+    is_active: bool | None = None
+
+
+@router.get("/partners")
+async def list_partners(
+    county: str | None = None,
+    category: str | None = None,
+    subsidy_status: str | None = None,
+    is_active: bool | None = True,
+    skip: int = 0,
+    limit: int = 50,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """List verified partner facilities for resource matching (roadmap 6.1)."""
+    from app.services.resource_service import ResourceService
+
+    svc = ResourceService()
+    partners = await svc.list_partners(
+        db,
+        county=county,
+        category=category,
+        subsidy_status=subsidy_status,
+        is_active=is_active,
+        skip=skip,
+        limit=limit,
+    )
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "category": p.category.value if hasattr(p.category, "value") else str(p.category),
+            "county": p.county,
+            "sub_county": p.sub_county,
+            "address": p.address,
+            "phone": p.phone,
+            "helpline": p.helpline,
+            "email": p.email,
+            "website": p.website,
+            "services_description": p.services_description,
+            "subsidy_status": p.subsidy_status.value if hasattr(p.subsidy_status, "value") else str(p.subsidy_status),
+            "verified_by": p.verified_by,
+            "operating_hours": p.operating_hours,
+            "is_active": p.is_active,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in partners
+    ]
+
+
+@router.post("/partners", status_code=status.HTTP_201_CREATED)
+async def create_partner(
+    body: PartnerCreateRequest,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a new vetted partner to the directory (roadmap 6.1 backfill workflow)."""
+    from app.services.resource_service import ResourceService
+
+    svc = ResourceService()
+    try:
+        partner = await svc.create_partner(db, body.model_dump())
+        return {
+            "id": partner.id,
+            "name": partner.name,
+            "category": partner.category.value if hasattr(partner.category, "value") else str(partner.category),
+            "county": partner.county,
+            "sub_county": partner.sub_county,
+            "status": "created",
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create partner: {exc}",
+        )
+
+
+@router.get("/partners/{partner_id}")
+async def get_partner(
+    partner_id: str,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.resource_service import ResourceService
+
+    svc = ResourceService()
+    p = await svc.get_partner(db, partner_id)
+    if p is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Partner not found")
+    return {
+        "id": p.id,
+        "name": p.name,
+        "category": p.category.value if hasattr(p.category, "value") else str(p.category),
+        "county": p.county,
+        "sub_county": p.sub_county,
+        "address": p.address,
+        "phone": p.phone,
+        "helpline": p.helpline,
+        "email": p.email,
+        "website": p.website,
+        "services_description": p.services_description,
+        "subsidy_status": p.subsidy_status.value if hasattr(p.subsidy_status, "value") else str(p.subsidy_status),
+        "verified_by": p.verified_by,
+        "operating_hours": p.operating_hours,
+        "is_active": p.is_active,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@router.put("/partners/{partner_id}")
+async def update_partner(
+    partner_id: str,
+    body: PartnerUpdateRequest,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.resource_service import ResourceService
+
+    svc = ResourceService()
+    p = await svc.update_partner(db, partner_id, body.model_dump(exclude_unset=True))
+    if p is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Partner not found")
+    return {
+        "id": p.id,
+        "name": p.name,
+        "status": "updated",
+    }
+
+
+# ------------------------------------------------------------- Referral Analytics (6.2)
+@router.get("/analytics/referrals")
+async def get_referral_analytics(
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate referral events for Concept Note KPI tracking (500+ referrals Year 1)."""
+    from app.services.resource_service import ResourceService
+
+    svc = ResourceService()
+    return await svc.get_referral_metrics(db)
+
+
+# ------------------------------------------------------------- DPA Compliance Controls (6.3)
+@router.get("/users/{user_uuid}/data-summary")
+async def get_user_data_summary(
+    user_uuid: str,
+    language: str = "sw",
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """DPA 2019 Section 26 Subject Access summary view."""
+    from app.services.compliance_service import ComplianceService
+
+    svc = ComplianceService()
+    summary = await svc.generate_data_summary(db, user_uuid, language=language)
+    return {"user_uuid": user_uuid, "summary": summary}
+
+
+@router.post("/users/{user_uuid}/purge")
+async def purge_user_data(
+    user_uuid: str,
+    request: Request,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """DPA 2019 Section 40 Data Erasure administrative purge."""
+    from app.services.compliance_service import ComplianceService
+
+    svc = ComplianceService()
+    session_store = getattr(request.app.state, "sessions", None)
+    result = await svc.wipe_user_data(
+        db,
+        user_uuid=user_uuid,
+        session_store=session_store,
+        actor="counselor",
+        actor_id=counselor.id,
+    )
+    return result
+
+
 # ----------------------------------------------------------------- helpers
 async def _broadcast(payload: dict) -> None:
     from app.api.ws import hub
