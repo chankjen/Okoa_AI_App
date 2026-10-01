@@ -33,20 +33,52 @@ async def verify_webhook(
 
 
 def _extract_events(payload: dict) -> list[InboundEvent]:
-    """Flatten a Cloud API messages webhook payload into InboundEvents."""
+    """Flatten a Cloud API messages webhook payload into InboundEvents.
+    
+    Supports text and interactive reply buttons/lists (roadmap 5.2).
+    """
     events: list[InboundEvent] = []
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for msg in value.get("messages", []):
-                if msg.get("type") != "text":
-                    # Phase 5 adds interactive/button parsing; ignore others now.
+                msg_type = msg.get("type")
+                text = ""
+                itype: str | None = None
+                iid: str | None = None
+
+                if msg_type == "text":
+                    text = (msg.get("text") or {}).get("body", "")
+                elif msg_type == "interactive":
+                    interactive = msg.get("interactive", {})
+                    itype = interactive.get("type")
+                    if itype == "button_reply":
+                        btn = interactive.get("button_reply", {})
+                        text = btn.get("title", "")
+                        iid = btn.get("id", "")
+                    elif itype == "list_reply":
+                        lst = interactive.get("list_reply", {})
+                        text = lst.get("title", "")
+                        iid = lst.get("id", "")
+                    else:
+                        continue
+                else:
+                    # Non-text media (voice notes, images, stickers)
                     continue
-                text = (msg.get("text") or {}).get("body", "")
+
                 wa_id = msg.get("from", "")
                 wa_msg_id = msg.get("id", "")
                 if wa_id and wa_msg_id:
-                    events.append(InboundEvent(wa_user_id=wa_id, text=text, wa_message_id=wa_msg_id))
+                    events.append(
+                        InboundEvent(
+                            wa_user_id=wa_id,
+                            text=text,
+                            wa_message_id=wa_msg_id,
+                            interactive_type=itype,
+                            interactive_id=iid,
+                            raw=msg,
+                        )
+                    )
     return events
 
 

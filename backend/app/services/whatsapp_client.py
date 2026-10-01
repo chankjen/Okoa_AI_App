@@ -36,19 +36,8 @@ class WhatsAppClient:
             return self._client
         return httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0))
 
-    async def send_text(self, to_wa_id: str, body: str, *, preview_url: bool = False) -> str | None:
-        """Send a plain-text message. Returns the provider message id or None.
-
-        ``to_wa_id`` is the WhatsApp user id (digits, no '+') — sourced from
-        the vault resolution done by the identity service; it never hits logs.
-        """
+    async def _post_message(self, payload: dict) -> str | None:
         url = f"{self.base}/{self.phone_number_id}/messages"
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": to_wa_id.lstrip("+"),
-            "type": "text",
-            "text": {"body": body[:4096], "preview_url": preview_url},
-        }
         headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
 
         owns_client = self._client is None
@@ -94,3 +83,66 @@ class WhatsAppClient:
         finally:
             if owns_client:
                 await client.aclose()
+
+    async def send_text(self, to_wa_id: str, body: str, *, preview_url: bool = False) -> str | None:
+        """Send a plain-text message. Returns provider message id or None."""
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_wa_id.lstrip("+"),
+            "type": "text",
+            "text": {"body": body[:4096], "preview_url": preview_url},
+        }
+        return await self._post_message(payload)
+
+    async def send_interactive_buttons(
+        self,
+        to_wa_id: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],  # [(button_id, button_title), ...] max 3
+    ) -> str | None:
+        """Send interactive reply buttons (roadmap 5.2). Max 3 buttons."""
+        button_elements = [
+            {
+                "type": "reply",
+                "reply": {
+                    "id": b_id[:256],
+                    "title": b_title[:20],  # WhatsApp 20 char max title limit
+                },
+            }
+            for b_id, b_title in buttons[:3]
+        ]
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_wa_id.lstrip("+"),
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text[:1024]},
+                "action": {"buttons": button_elements},
+            },
+        }
+        return await self._post_message(payload)
+
+    async def send_interactive_list(
+        self,
+        to_wa_id: str,
+        body_text: str,
+        button_label: str,
+        sections: list[dict],
+    ) -> str | None:
+        """Send interactive list message (roadmap 5.2). Supports up to 10 rows."""
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_wa_id.lstrip("+"),
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": body_text[:1024]},
+                "action": {
+                    "button": button_label[:20],
+                    "sections": sections,
+                },
+            },
+        }
+        return await self._post_message(payload)
+

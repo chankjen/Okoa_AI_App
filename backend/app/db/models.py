@@ -312,3 +312,99 @@ class ResponseDrill(Base):
     participants: Mapped[str | None] = mapped_column(String(256), nullable=True)
     passed: Mapped[bool] = mapped_column(Boolean, default=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Conversational AI & RAG Context Layer (roadmap 4.5)
+# ---------------------------------------------------------------------------
+
+
+class CbtStrategy(Base):
+    """Vetted CBT coping strategies and psychological resources for RAG.
+
+    Contains clinical techniques (thought reframing, box breathing, grounding)
+    categorized by problem domain and language (sw, sheng, en).
+    Zero PII is ever stored in this table.
+    """
+
+    __tablename__ = "cbt_strategies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    category: Mapped[str] = mapped_column(String(64), index=True)  # anxiety | depression | panic | grief | insomnia | craving
+    language: Mapped[str] = mapped_column(String(10), index=True, default="sw")  # sw | sheng | en
+    title: Mapped[str] = mapped_column(String(128))
+    summary: Mapped[str] = mapped_column(String(256))
+    instructions: Mapped[str] = mapped_column(Text)
+    keywords: Mapped[str] = mapped_column(String(512), default="")  # comma-separated lookup tags
+    embedding_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON-encoded float vector for similarity search
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Daily Check-ins, Mood Tracking & Retention Loops (roadmap 5.1-5.5)
+# ---------------------------------------------------------------------------
+
+
+class MoodEntry(Base):
+    """Structured mood logs and trigger records (roadmap 5.2 / 5.3)."""
+
+    __tablename__ = "mood_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    user_uuid: Mapped[str] = mapped_column(ForeignKey("users.user_uuid"), index=True)
+    score: Mapped[int] = mapped_column()  # 1 (overwhelmed/crisis) to 5 (great/fiti)
+    label: Mapped[str] = mapped_column(String(32))  # great | good | okay | low | overwhelmed
+    trigger_category: Mapped[str | None] = mapped_column(String(64), nullable=True)  # cravings | work | family | loneliness | sleep
+    raw_selection: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+Index("ix_mood_entries_user_created", MoodEntry.user_uuid, MoodEntry.created_at.desc())
+
+
+class CheckInSchedule(Base):
+    """User check-in cadences, quiet hours, and frequency limits (roadmap 5.1)."""
+
+    __tablename__ = "checkin_schedules"
+
+    user_uuid: Mapped[str] = mapped_column(ForeignKey("users.user_uuid"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    preferred_hour_eat: Mapped[int] = mapped_column(default=9)  # 09:00 EAT (UTC+3)
+    last_prompted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    streak_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MicroSurveyResponse(Base):
+    """Weekly self-report outcomes for clinical pilot KPI tracking (roadmap 5.4)."""
+
+    __tablename__ = "micro_survey_responses"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+    user_uuid: Mapped[str] = mapped_column(ForeignKey("users.user_uuid"), index=True)
+    survey_type: Mapped[str] = mapped_column(String(32), index=True)  # craving | stress | phq2 | gad2
+    score: Mapped[float] = mapped_column()  # 1.0 .. 5.0 normalized or clinical scale sum
+    responses_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RecoveryTracker(Base):
+    """'Days clean' recovery milestones and motivational streaks (roadmap 5.5, Amina persona)."""
+
+    __tablename__ = "recovery_trackers"
+
+    user_uuid: Mapped[str] = mapped_column(ForeignKey("users.user_uuid"), primary_key=True)
+    target_habit: Mapped[str] = mapped_column(String(64), default="substances")  # alcohol | substances | smoking | betting
+    start_date: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    current_streak_days: Mapped[int] = mapped_column(default=0)
+    longest_streak_days: Mapped[int] = mapped_column(default=0)
+    last_checkin_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    milestones_reached_json: Mapped[str] = mapped_column(Text, default="[]")  # e.g. ["day_1", "day_3", "day_7"]
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+

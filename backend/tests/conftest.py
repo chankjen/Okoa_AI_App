@@ -56,10 +56,43 @@ class FakeWhatsAppClient:
 
     def __init__(self):
         self.sent: list[tuple[str, str]] = []
+        self.interactive_sent: list[dict] = []
 
     async def send_text(self, to_wa_id: str, body: str, *, preview_url: bool = False) -> str:
         self.sent.append((to_wa_id, body))
         return f"wamid.fake.{len(self.sent)}"
+
+    async def send_interactive_buttons(
+        self,
+        to_wa_id: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
+    ) -> str:
+        self.sent.append((to_wa_id, body_text))
+        self.interactive_sent.append({
+            "type": "button",
+            "to": to_wa_id,
+            "body": body_text,
+            "buttons": buttons,
+        })
+        return f"wamid.fake.btn.{len(self.sent)}"
+
+    async def send_interactive_list(
+        self,
+        to_wa_id: str,
+        body_text: str,
+        button_label: str,
+        sections: list[dict],
+    ) -> str:
+        self.sent.append((to_wa_id, body_text))
+        self.interactive_sent.append({
+            "type": "list",
+            "to": to_wa_id,
+            "body": body_text,
+            "button_label": button_label,
+            "sections": sections,
+        })
+        return f"wamid.fake.list.{len(self.sent)}"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -135,6 +168,50 @@ def wa_message_payload(wa_user_id: str, text: str, msg_id: str | None = None) ->
                             "messages": [
                                 {"from": wa_user_id, "id": msg_id, "timestamp": "1700000000",
                                  "type": "text", "text": {"body": text}}
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    return json.dumps(payload).encode()
+
+
+def wa_interactive_payload(
+    wa_user_id: str,
+    interactive_type: str,  # button_reply | list_reply
+    interactive_id: str,
+    title: str,
+    msg_id: str | None = None,
+) -> bytes:
+    msg_id = msg_id or f"wamid.btn.{uuid.uuid4().hex}"
+    interactive_body: dict = {"type": interactive_type}
+    if interactive_type == "button_reply":
+        interactive_body["button_reply"] = {"id": interactive_id, "title": title}
+    elif interactive_type == "list_reply":
+        interactive_body["list_reply"] = {"id": interactive_id, "title": title}
+
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "111",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"display_phone_number": "1555000", "phone_number_id": "1234567890"},
+                            "contacts": [{"wa_id": wa_user_id, "profile": {"name": "X"}}],
+                            "messages": [
+                                {
+                                    "from": wa_user_id,
+                                    "id": msg_id,
+                                    "timestamp": "1700000000",
+                                    "type": "interactive",
+                                    "interactive": interactive_body,
+                                }
                             ],
                         },
                     }

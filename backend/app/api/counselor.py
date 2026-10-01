@@ -446,6 +446,89 @@ async def drill_summary(_: Counselor = Depends(require_counselor),
     return {"weeks": weeks, "weeks_passing_120s": len(ok)}
 
 
+# ------------------------------------------------------------- Phase 5 Retention & Mood
+@router.get("/users/{user_uuid}/mood-history")
+async def get_user_mood_history(
+    user_uuid: str,
+    limit: int = 14,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve mood history and downward spiral trend analytics for a user."""
+    from app.services.mood_service import MoodService
+
+    svc = MoodService()
+    history = await svc.get_history(db, user_uuid, limit=limit)
+    trend = await svc.analyze_trend(db, user_uuid)
+    return {
+        "user_uuid": user_uuid,
+        "history": [
+            {
+                "id": m.id,
+                "score": m.score,
+                "label": m.label,
+                "trigger_category": m.trigger_category,
+                "raw_selection": m.raw_selection,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in history
+        ],
+        "trend": {
+            "average_recent_score": trend.average_recent_score,
+            "is_downward_trend": trend.is_downward_trend,
+            "dominant_triggers": trend.dominant_triggers,
+            "suggested_action": trend.suggested_action,
+        },
+    }
+
+
+@router.get("/users/{user_uuid}/recovery")
+async def get_user_recovery(
+    user_uuid: str,
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve recovery milestones and sobriety streaks for a user."""
+    import json
+    from app.services.recovery_service import RecoveryService
+
+    svc = RecoveryService()
+    tracker = await svc.get_or_create_tracker(db, user_uuid)
+    try:
+        milestones = json.loads(tracker.milestones_reached_json or "[]")
+    except Exception:
+        milestones = []
+    return {
+        "user_uuid": user_uuid,
+        "target_habit": tracker.target_habit,
+        "current_streak_days": tracker.current_streak_days,
+        "longest_streak_days": tracker.longest_streak_days,
+        "last_checkin_at": tracker.last_checkin_at.isoformat() if tracker.last_checkin_at else None,
+        "milestones_reached": milestones,
+    }
+
+
+@router.get("/analytics/surveys")
+async def get_survey_analytics(
+    survey_type: str = "craving",
+    counselor: Counselor = Depends(require_counselor),
+    db: AsyncSession = Depends(get_db),
+):
+    """Calculate baseline vs latest clinical outcome score deltas across pilot cohort."""
+    from app.services.survey_service import SurveyService
+
+    svc = SurveyService()
+    deltas = await svc.get_pilot_cohort_deltas(db, survey_type=survey_type)
+    return {
+        "survey_type": deltas.survey_type,
+        "total_users_evaluated": deltas.total_users_evaluated,
+        "baseline_avg_score": deltas.baseline_avg_score,
+        "latest_avg_score": deltas.latest_avg_score,
+        "net_score_delta": deltas.net_score_delta,
+        "pct_users_improved": deltas.pct_users_improved,
+    }
+
+
 # ------------------------------------------------------------- on-duty 3.4
 class DutyRequest(BaseModel):
     on_duty: bool
@@ -485,3 +568,4 @@ def _service_from_request(request: Request):
         svc = _EscalationService(notifier=_notifier, hub=_hub)
         request.app.state.escalation = svc
         return svc
+

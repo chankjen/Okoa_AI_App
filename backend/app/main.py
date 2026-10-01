@@ -18,8 +18,11 @@ from app.core.logging import configure_logging, new_request_id, request_id_var
 from app.db.session import dispose_engine, get_session_factory, init_models
 from app.safety.escalation import EscalationService
 from app.services.identity_service import IdentityService
+from app.services.llm_client import Llama3Client
 from app.services.notifications import Notifier
 from app.services.pipeline import MessagePipeline
+from app.services.prompt_service import PromptService
+from app.services.rag_service import RagService
 from app.services.session_store import SessionStore
 from app.services.whatsapp_client import WhatsAppClient
 from app.vault.crypto import IdentityVault
@@ -62,12 +65,35 @@ def create_app() -> FastAPI:
         app.state.notifier = Notifier(wa_client=app.state.wa)
         app.state.hub = ws.hub
         app.state.escalation = EscalationService(notifier=app.state.notifier, hub=app.state.hub)
+        # Phase 4 components
+        app.state.llm = Llama3Client(settings=settings)
+        app.state.prompts = PromptService()
+        app.state.rag = RagService()
+        # Phase 5 components
+        from app.services.mood_service import MoodService
+        from app.services.survey_service import SurveyService
+        from app.services.recovery_service import RecoveryService
+        from app.services.scheduler import CheckInScheduler
+
+        app.state.mood_service = MoodService()
+        app.state.survey_service = SurveyService()
+        app.state.recovery_service = RecoveryService()
+        app.state.scheduler = CheckInScheduler(
+            identity_service=app.state.identity,
+            wa_client=app.state.wa,
+        )
         app.state.pipeline = MessagePipeline(
             session_factory=get_session_factory(),
             identity=app.state.identity,
             sessions=app.state.sessions,
             wa=app.state.wa,
             escalation=app.state.escalation,
+            llm=app.state.llm,
+            prompts=app.state.prompts,
+            rag=app.state.rag,
+            mood_service=app.state.mood_service,
+            survey_service=app.state.survey_service,
+            recovery_service=app.state.recovery_service,
         )
         app.state.pipeline.start()
         logger.info("okoa backend ready env=%s", settings.environment)
@@ -75,7 +101,7 @@ def create_app() -> FastAPI:
         await app.state.pipeline.stop()
         await dispose_engine()
 
-    app = FastAPI(title="OKOA AI Backend", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(title="OKOA AI Backend", version="0.5.0", lifespan=lifespan)
     app.add_middleware(RequestIDMiddleware)
 
     cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
@@ -96,7 +122,7 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     async def root():
-        return {"service": settings.app_name, "phase": "3-counselor-loop"}
+        return {"service": settings.app_name, "phase": "5-mood-tracking-retention"}
 
     return app
 

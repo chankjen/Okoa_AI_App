@@ -36,7 +36,14 @@ from app.db.models import (
 from app.services.crisis_keywords import CRISIS_RESPONSE_TEXT, detect_crisis
 from app.services.webhook_security import verify_signature  # noqa: F401 (re-export for tests)
 from app.services.identity_service import IdentityService
+from app.services.language_service import detect_language
+from app.services.llm_client import Llama3Client
+from app.services.mood_service import MoodService
+from app.services.prompt_service import PromptService
+from app.services.rag_service import RagService
+from app.services.recovery_service import RecoveryService
 from app.services.session_store import SessionStore
+from app.services.survey_service import SurveyService
 from app.services.whatsapp_client import WhatsAppClient
 
 logger = logging.getLogger("okoa.pipeline")
@@ -75,6 +82,8 @@ class InboundEvent:
     wa_user_id: str          # phone digits from webhook — consumed once, then dropped
     text: str
     wa_message_id: str
+    interactive_type: str | None = None  # button_reply | list_reply (roadmap 5.2)
+    interactive_id: str | None = None    # structured button or row id (e.g. mood_great, trigger_cravings)
     raw: dict = field(default_factory=dict)
 
 
@@ -86,6 +95,12 @@ class MessagePipeline:
         sessions: SessionStore,
         wa: WhatsAppClient,
         escalation=None,
+        llm: Llama3Client | None = None,
+        prompts: PromptService | None = None,
+        rag: RagService | None = None,
+        mood_service: MoodService | None = None,
+        survey_service: SurveyService | None = None,
+        recovery_service: RecoveryService | None = None,
     ):
         self.session_factory = session_factory
         self.identity = identity
@@ -94,6 +109,14 @@ class MessagePipeline:
         # Phase 2/3: EscalationService (risk persistence + crisis routing).
         # Optional so the pipeline degrades to Phase-1 behaviour if unwired.
         self.escalation = escalation
+        # Phase 4: Conversational AI & RAG components
+        self.llm = llm or Llama3Client()
+        self.prompts = prompts or PromptService()
+        self.rag = rag or RagService()
+        # Phase 5: Mood tracking, micro-surveys, and recovery streaks
+        self.mood_service = mood_service or MoodService()
+        self.survey_service = survey_service or SurveyService()
+        self.recovery_service = recovery_service or RecoveryService()
         self.queue: asyncio.Queue[InboundEvent] = asyncio.Queue(maxsize=10_000)
         self._worker: asyncio.Task | None = None
         self.settings = get_settings()
@@ -144,6 +167,12 @@ class MessagePipeline:
             user_uuid, is_new = await self.identity.resolve_or_enrol(db, event.wa_user_id)
             user = await db.get(User, user_uuid)
             await self.identity.mark_seen(db, user_uuid)
+
+            # Language auto-detection (roadmap 4.6): detect sheng / sw / en
+            detected_lang = detect_language(event.text, default=user.language or "sw" if user else "sw").language
+            if user is not None and user.language != detected_lang:
+                user.language = detected_lang
+                await db.flush()
 
             # 3. Opt-out gate: STOP/FUTA handling (roadmap 1.5).
             stripped = event.text.strip().lower()
@@ -217,6 +246,81 @@ class MessagePipeline:
                 await db.commit()
                 return
 
+            # 4c. Phase 5 retention, mood tracking, micro-surveys & recovery milestones (roadmap 5.2 - 5.5)
+            iid = (event.interactive_id or "").lower()
+            if iid.startswith("mood_") or iid.startswith("trigger_"):
+                entry = await self.mood_service.log_mood(
+                    db, user_uuid, event.text, interactive_id=event.interactive_id
+                )
+                trend = await self.mood_service.analyze_trend(db, user_uuid)
+
+                # Check crisis or downward spiral escalation
+                is_crisis = detect_crisis(event.text)
+                if is_crisis:
+                    await self._send(db, user_uuid, event, CRISIS_RESPONSE_TEXT, MessageKind.crisis_response, risk_label="crisis")
+                    await db.commit()
+                    return
+
+                if trend.suggested_action == "escalate_counselor":
+                    await self._request_human(db, user_uuid, event)
+
+                if entry.score >= 4:
+                    mood_ack = {
+                        "sw": "Asante kwa kushiriki! 🌟 Tunafurahi kusikia kwamba uko salama na vizuri leo. Endelea hivi hivi!",
+                        "sheng": "Thanks kwa kucheck in! 🌟 Tunabambika kusikia rada yako iko fiti leo. Zidi hivyo hivyo champ!",
+                        "en": "Thank you for checking in! 🌟 Glad to hear you're feeling good today. Keep going strong!",
+                    }.get(detected_lang, "Asante kwa kushiriki! 🌟")
+                elif entry.score == 3:
+                    mood_ack = {
+                        "sw": "Asante kwa ukweli wako. 🤍 Siku za kawaida bado ni ushindi. Tuko hapa ukihitaji kupiga stori.",
+                        "sheng": "Thanks kwa kunicheki. 🤍 Hata siku za kawaida ni step mbele. Ukidai stori tuko hapa.",
+                        "en": "Thanks for checking in. 🤍 Taking it one day at a time is real progress. I'm right here if you want to talk.",
+                    }.get(detected_lang, "Asante kwa ukweli wako. 🤍")
+                else:
+                    mood_ack = {
+                        "sw": "Pole sana. 🤍 Pole kwa hisia hizo ngumu leo. Kumbuka hauko peke yako kamwe. Ungependa tujaribu zoezi fupi la kupumua (box breathing) au kuongea na mshauri?",
+                        "sheng": "Pole sana manze. 🤍 Hizo feelings ni mzigo mzito but hauko solo. Ungetaka tufanye breathing exercise fupi ama uongee na mshauri wetu?",
+                        "en": "I'm really sorry you're feeling down today. 🤍 You don't have to carry this alone. Would you like to try a short breathing exercise or speak to an OKOA counselor?",
+                    }.get(detected_lang, "Pole sana. 🤍 Tuko pamoja nawe.")
+
+                await self._send(db, user_uuid, event, mood_ack, MessageKind.canned_reply, risk_label="distressed" if entry.score <= 2 else "safe")
+                await db.commit()
+                return
+
+            if iid.startswith("survey_"):
+                parsed = self.survey_service.parse_survey_selection(event.text, interactive_id=event.interactive_id)
+                if parsed:
+                    stype, score = parsed
+                    await self.survey_service.record_survey_response(db, user_uuid, stype, score)
+                survey_ack = {
+                    "sw": "Asante sana kwa tathmini yako ya leo! 📊 Majibu yako yanatusaidia kuelewa na kuboresha safari yako ya afya.",
+                    "sheng": "Shukran kwa kutuma tathmini yako! 📊 Inatusaidia sana kuelewa progress yako na kukusupport poa.",
+                    "en": "Thank you for completing this check-in! 📊 Your response helps us track and support your journey.",
+                }.get(detected_lang, "Asante sana kwa tathmini yako! 📊")
+                await self._send(db, user_uuid, event, survey_ack, MessageKind.canned_reply, risk_label="safe")
+                await db.commit()
+                return
+
+            if iid.startswith("recovery_") or stripped in {"clean today", "siku safi", "nimebaki safi", "day clean"}:
+                tracker, celebration = await self.recovery_service.log_clean_day(db, user_uuid, language=detected_lang)
+                if celebration:
+                    reply_text = celebration
+                else:
+                    reply_text = {
+                        "sw": f"Hongera sana! Siku nyingine safi imerekodiwa (Siku {tracker.current_streak_days}). Hatua kwa hatua!",
+                        "sheng": f"Saluti! Day ingine safi imeingia kwa record (Day {tracker.current_streak_days}). One day at a time champ!",
+                        "en": f"Well done! Another clean day recorded (Day {tracker.current_streak_days}). One day at a time!",
+                    }.get(detected_lang, f"Hongera! Siku {tracker.current_streak_days} safi.")
+                await self._send(db, user_uuid, event, reply_text, MessageKind.canned_reply, risk_label="safe")
+                await db.commit()
+                return
+
+            if stripped in {"relapse", "nilitumia", "nimerudi nyuma", "slip"}:
+                tracker, reset_msg = await self.recovery_service.reset_streak(db, user_uuid, language=detected_lang)
+                await self._send(db, user_uuid, event, reset_msg, MessageKind.canned_reply, risk_label="distressed")
+                await db.commit()
+                return
+
             # 5. Risk pre-screening gate (roadmap 2.3) with crisis routing
             #    (2.4) + escalation queue (3.1). Falls back to Phase-1 keyword
             #    detection when the engine is disabled or unwired.
@@ -234,7 +338,9 @@ class MessagePipeline:
             # Both 'safe' and 'distressed' messages are eligible for LLM generation
             # (roadmap Phase 4: 'the LLM only ever sees low/medium-risk messages').
             risk_label_str = result.label.value if result else "safe"
-            llm_reply = await self._generate_llm_reply(db, user_uuid, event, risk_label_str)
+            llm_reply = await self._generate_llm_reply(
+                db, user_uuid, event, risk_label_str, language=detected_lang
+            )
             if llm_reply:
                 await self._send(db, user_uuid, event, llm_reply,
                                  MessageKind.canned_reply, risk_label=risk_label_str)
@@ -401,52 +507,37 @@ class MessagePipeline:
         user_uuid: str,
         event: InboundEvent,
         risk_label: str,
+        language: str = "sw",
     ) -> str | None:
-        """Call LLM inference serving (Phase 4), or return None on failure/unconfigured."""
-        if not self.settings.enable_llm or not self.settings.llm_api_base:
-            return None
-        import httpx
-
+        """Call LLM inference serving with CBT RAG context (Phase 4)."""
         session_id = await self.sessions.get_active_session_id(user_uuid)
         history = await get_session_history(db, user_uuid, session_id=session_id, limit=8)
 
-        system_prompt = (
-            "You are OKOA, a compassionate, anonymous mental health companion in Kenya. "
-            "Communicate warmly in Swahili, Sheng, or English matching the user. "
-            "Hard rules: no medication advice, no medical diagnosis, always encourage safety."
+        # Retrieve relevant CBT coping strategies via RAG (roadmap 4.5)
+        strategies = await self.rag.retrieve(db, event.text, language=language, limit=1)
+        rag_context = self.rag.format_context_block(strategies)
+
+        # Assemble culturally-adapted, guardrailed system prompt (roadmap 4.1)
+        system_prompt = self.prompts.build_system_prompt(
+            language=language,
+            risk_label=risk_label,
+            rag_context=rag_context,
         )
-        if risk_label == "distressed":
-            system_prompt += (
-                " The user is experiencing emotional distress. Offer gentle CBT-based "
-                "validation, grounding, and empathetic listening."
-            )
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": event.text})
 
-        headers = {"Content-Type": "application/json"}
-        if self.settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
-
-        payload = {
-            "model": self.settings.llm_model_name,
-            "messages": messages,
-            "max_tokens": self.settings.llm_max_tokens,
-            "temperature": self.settings.llm_temperature,
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_seconds) as client:
-                url = f"{self.settings.llm_api_base.rstrip('/')}/chat/completions"
-                resp = await client.post(url, json=payload, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                logger.warning("llm inference returned status=%d body=%s", resp.status_code, resp.text[:200])
+            resp = await self.llm.generate_response(
+                messages,
+                language=language,
+                risk_label=risk_label,
+            )
+            return resp.content
         except Exception as exc:
-            logger.warning("llm inference failed (%s); falling back to supportive template", type(exc).__name__)
-        return None
+            logger.warning("llm inference error (%s); falling back", type(exc).__name__)
+            return None
 
 
 # ---------------------------------------------------------------------------
